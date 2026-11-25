@@ -1545,6 +1545,62 @@ class test_chain(CanvasCase):
 
         assert x.apply().get() == 3
 
+    def test_task_or_empty_chain_with_link(self):
+        # https://github.com/celery/celery/issues/11162
+        first = self.add.s(1, 1)
+        empty = chain(app=self.app)
+        empty.link(self.add.s(10))
+        sig = first | empty
+        assert isinstance(sig, _chain)
+        assert len(sig.tasks) == 1
+        assert sig.options['link'] == empty.options['link']
+
+    def test_task_or_empty_chain_with_link_callback_fires(self):
+        self.app.conf.task_always_eager = True
+        called = []
+
+        @self.app.task
+        def record(x):
+            called.append(x)
+            return x
+
+        first = self.add.s(1, 1)
+        empty = chain(app=self.app)
+        empty.link(record.s())
+        sig = first | empty
+        assert sig.apply().get() == 2
+        assert called == [2]
+
+    def test_empty_chain_with_link_or_task(self):
+        empty = chain(app=self.app)
+        empty.link(self.add.s(10))
+        sig = empty | self.add.s(1, 1)
+        assert isinstance(sig, _chain)
+        assert len(sig.tasks) == 1
+        assert sig.options.get('link')
+
+    def test_chain_or_empty_chain_with_link(self):
+        empty = chain(app=self.app)
+        empty.link(self.add.s(10))
+        sig = chain(self.add.s(1, 1), app=self.app) | empty
+        assert sig.options.get('link')
+
+    def test_fold_chain_with_empty_chain_with_link(self):
+        first = self.add.s(1, 1)
+        empty = chain()
+        empty.link(self.add.s(10))
+        sig = chain(first, empty)
+        # The empty chain is spliced away and its callback is kept on
+        # the previous task.
+        assert len(sig.tasks) == 1
+        assert sig.tasks[0].options.get('link')
+
+    def test_unchain_tasks_empty_chain_with_link(self):
+        empty = chain(app=self.app)
+        empty.link(self.add.s(10))
+        empty.link_error(self.add.s(1))
+        assert empty.unchain_tasks() == []
+
     @pytest.mark.usefixtures('depends_on_current_app')
     def test_chain_single_child_result(self):
         child_sig = self.add.si(1, 1)

@@ -99,6 +99,15 @@ def _merge_chain_step(steps, other, clone_other=True):
         return steps
     if isinstance(other, _chain):
         inner = other.unchain_tasks()
+        if not inner:
+            # Composing with an empty chain: keep its callbacks on the
+            # previous step, which is where its result would come from.
+            if steps:
+                steps[-1] = steps[-1].clone()
+                for key in ('link', 'link_error'):
+                    for callback in maybe_list(other.options.get(key)) or []:
+                        steps[-1].append_to_list_option(key, callback)
+            return steps
         remaining = iter(inner)
         for position, task in enumerate(remaining):
             result = _merge_chain_step(
@@ -125,6 +134,20 @@ def _merge_chain_step(steps, other, clone_other=True):
         steps.append(other.clone() if clone_other else other)
         return steps
     return NotImplemented
+
+
+def _chain_callback_options(sig):
+    """Return the callback options (``link``, ``link_error``) of a signature.
+
+    Used when composing with an empty chain: the chain has no task that
+    could carry its callbacks, so they are kept as options on the
+    composed canvas instead of being lost.
+    """
+    return {
+        key: maybe_list(sig.options.get(key))
+        for key in ('link', 'link_error')
+        if sig.options.get(key)
+    }
 
 
 def _fold_chain(tasks):
@@ -931,6 +954,12 @@ class Signature(dict):
         """
         if isinstance(other, _chain):
             # task | chain -> chain
+            if not other.tasks:
+                # Composing with an empty chain: there is no task in it
+                # that could carry the chain's callbacks, so keep them
+                # on the composed chain instead of raising IndexError.
+                return _chain([self], app=self._app,
+                              **_chain_callback_options(other))
             return _chain(seq_concat_seq(
                 (self,), other.unchain_tasks()), app=self._app)
         elif isinstance(other, group):
@@ -1147,6 +1176,15 @@ class _chain(Signature):
                 tasks, other), app=self._app)
         elif isinstance(other, _chain):
             # chain | chain -> chain
+            if not other.tasks:
+                # Composing with an empty chain: keep its callbacks on
+                # the resulting chain (there is no task in it that
+                # could carry them).
+                sig = self.clone()
+                for key in ('link', 'link_error'):
+                    for callback in maybe_list(other.options.get(key)) or []:
+                        sig.append_to_list_option(key, callback)
+                return sig
             return reduce(operator.or_, other.unchain_tasks(), self)
         elif isinstance(other, Signature):
             if self.tasks and isinstance(self.tasks[-1], group):
@@ -1170,6 +1208,12 @@ class _chain(Signature):
             else:
                 # chain | task/chord -> chain
                 # use type(self) for _chain subclasses
+                if not self.tasks:
+                    # Composing an empty chain: keep its callbacks on
+                    # the resulting chain (there is no task in it that
+                    # could carry them).
+                    return type(self)([other], app=self._app,
+                                      **_chain_callback_options(self))
                 return type(self)(seq_concat_item(
                     self.unchain_tasks(), other), app=self._app)
         else:
@@ -1192,10 +1236,16 @@ class _chain(Signature):
         All of the tasks would be linked to the same error callback
         as the chain itself, to ensure that the correct error callback is called
         if any of the (cloned) tasks of the chain fail.
+
+        An empty chain has no task that could carry its callbacks, so
+        the empty list is returned as-is and the composition operators
+        are responsible for keeping the chain's callbacks.
         """
         # Clone chain's tasks assigning signatures from link_error
         # to each task and adding the chain's links to the last task.
         tasks = [t.clone() for t in self.tasks]
+        if not tasks:
+            return tasks
         for sig in maybe_list(self.options.get('link')) or []:
             tasks[-1].link(sig)
         for sig in maybe_list(self.options.get('link_error')) or []:
